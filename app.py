@@ -1,15 +1,14 @@
 import asyncio
-import logging
 import os
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 import dotenv
 import requests
+from loguru import logger
 
 dotenv.load_dotenv()
-
-logger = logging.getLogger(__name__)
 
 PORT_API_URL = "https://api.getport.io/v1"
 PORT_CLIENT_ID = os.getenv("PORT_CLIENT_ID")
@@ -83,20 +82,23 @@ async def get_github_packages(
     page_size = DEFAULT_PAGE_SIZE
 
     while page_size >= DEFAULT_PAGE_SIZE:
+        logger.info(f"Retrieving page {query_params['page']} of packages for {package_type}")
         async with session.get(
-            f"{url}/packages?",
-            params=query_params,
+            f"{url}/packages?{urlencode(query_params)}",
             headers={
                 "Authorization": f"Bearer {GITHUB_ACCESS_TOKEN}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         ) as response:
-            response.raise_for_status()
+            if not response.ok:
+                logger.error(f"Error retrieving packages: {response.status} error")
+                return
+
             packages: list[dict[str, Any]] = await response.json()
             page_size = len(packages)
             query_params["page"] += 1
-            logger.info(f"Retrieved packages")
+            logger.info(f"Retrieved page for packages")
             yield packages
 
 
@@ -111,7 +113,7 @@ async def get_package_metadata(
     metadata: dict
         The metadata for the given package
     """
-    logger.info(f"Getting package metadata")
+    logger.info(f"Getting package metadata for package: {package['name']}")
     async with session.get(
         f"{package['url']}/versions",
         headers={
@@ -120,11 +122,11 @@ async def get_package_metadata(
             "X-GitHub-Api-Version": "2022-11-28",
         },
     ) as response:
-        response.raise_for_status()
-        metadata: list[dict[str, Any]] = await response.json()
-        logger.info(f"Retrieved package metadata")
-        if not metadata:
+        if not response.ok:
+            logger.error(f"Error retrieving package metadata: {response.status} error")
             return None
+        metadata: list[dict[str, Any]] = await response.json()
+        logger.info(f"Retrieved package metadata for package: {package['name']}")
         return metadata[0]
 
 
@@ -153,7 +155,7 @@ async def ingest_package_into_port(
 
 async def main():
     logger.info("Starting Port integration")
-    url = "https://api.github.com/orgs/{ORGANIZATION_NAME}"
+    url = f"https://api.github.com/orgs/{ORGANIZATION_NAME}"
     async with aiohttp.ClientSession() as session:
         for package_type in PACKAGE_TYPES:
             async for packages in get_github_packages(session, url, package_type):
@@ -164,7 +166,7 @@ async def main():
                     await ingest_package_into_port(
                         session, package, package_metadata, package_type
                     )
-    logger.info("Finished Port integration")
+    logger.info("Ingested all packages into Port")
 
 
 if __name__ == "__main__":
